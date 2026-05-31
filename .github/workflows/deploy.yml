@@ -12,6 +12,9 @@ on:
       - 'land-screening/**'
       - 'eudr/**'
       - 'land-planning/**'
+      - 'ndvi/**'
+      - 'landcover/**'
+      - 'biomass/**'
       - 'tools/setup_iap.sh'
       - '.github/workflows/deploy.yml'
 
@@ -58,6 +61,54 @@ jobs:
             --region "$REGION" \
             --platform managed \
             --no-allow-unauthenticated \
+            --service-account "${{ vars.GCP_RUNTIME_SA }}" \
+            --memory 1Gi \
+            --timeout 300 \
+            --min-instances 0 \
+            --max-instances 10 \
+            --quiet
+
+      - name: Show service URL
+        run: |
+          gcloud run services describe "${{ matrix.service }}" \
+            --project "$PROJECT_ID" --region "$REGION" \
+            --format 'value(status.url)'
+
+  deploy-apis:
+    name: Deploy ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dir: ndvi
+            service: ndvi-service
+          - dir: landcover
+            service: landcover-service
+          - dir: biomass
+            service: biomass-service
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      # GEE APIs consumed by the OpenAI agent (MCP tools): public, no IAP.
+      - name: Deploy ${{ matrix.service }} to Cloud Run
+        run: |
+          gcloud run deploy "${{ matrix.service }}" \
+            --source "${{ matrix.dir }}" \
+            --project "$PROJECT_ID" \
+            --region "$REGION" \
+            --platform managed \
+            --allow-unauthenticated \
             --service-account "${{ vars.GCP_RUNTIME_SA }}" \
             --memory 1Gi \
             --timeout 300 \

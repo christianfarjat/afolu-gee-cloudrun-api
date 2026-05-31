@@ -128,11 +128,14 @@ Ver detalle en [`docs/IAP_AUTH.md`](IAP_AUTH.md).
 - **Manual:** pestaña **Actions → Deploy ForestScan tiers → Run workflow**
   (podés elegir la rama, ej. la del PR).
 
-El workflow:
-1. **deploy** (matriz, en paralelo) — buildea y despliega cada tier a Cloud Run
-   con `--no-allow-unauthenticated` y el SA de runtime.
-2. **setup-iap** — corre `tools/setup_iap.sh` para activar IAP y autorizar el
-   dominio Workspace en cada tier.
+El workflow tiene tres jobs:
+1. **deploy** (matriz) — despliega los 3 tiers de ForestScan a Cloud Run con
+   `--no-allow-unauthenticated` (acceso por IAP) y el SA de runtime.
+2. **deploy-apis** (matriz) — despliega las APIs de GEE (`ndvi-service`,
+   `landcover-service`, `biomass-service`) con `--allow-unauthenticated`
+   (públicas, consumidas por el agente de OpenAI como herramientas MCP).
+3. **setup-iap** — corre `tools/setup_iap.sh` para activar IAP y autorizar el
+   dominio Workspace en cada tier (no aplica a las APIs públicas).
 
 ## Verificación post-deploy
 
