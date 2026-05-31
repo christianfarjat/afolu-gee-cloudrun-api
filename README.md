@@ -159,12 +159,22 @@ gcloud run deploy ndvi-service \
 
 ## 🔐 Authentication
 
-The services use Google Application Default Credentials (ADC) for GEE authentication. In Cloud Run, this is automatically handled by the service account.
+There are two independent layers of authentication:
+
+**1. GEE backend auth** — The services use Google Application Default Credentials (ADC) for GEE authentication. In Cloud Run, this is automatically handled by the service account.
 
 For local development:
 ```bash
 gcloud auth application-default login
 ```
+
+**2. User access (ForestScan tiers)** — Each ForestScan tier (Land Screening, EUDR, Land Planning) is protected with **Cloud IAP**, so users log in with their **Google Workspace email** (`@mjmenergia.com`). IAP validates identity before the request reaches Cloud Run, with no code changes and no load balancer.
+
+```bash
+bash tools/setup_iap.sh
+```
+
+See [`docs/IAP_AUTH.md`](docs/IAP_AUTH.md) for the full setup and operations guide.
 
 ## 💰 Costs
 
