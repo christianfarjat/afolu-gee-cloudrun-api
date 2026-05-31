@@ -1,11 +1,13 @@
 """ForestScan - Land Screening tier.
 
-Initial screening of a parcel: quick land cover snapshot and a preliminary
-deforestation/risk overview to decide whether a deeper analysis (EUDR, Land
+Initial screening of a parcel: a quick land-cover snapshot plus a preliminary
+deforestation-risk overview to decide whether a deeper analysis (EUDR, Land
 Planning) is warranted.
 
-This is a SKELETON: the GEE wiring and endpoints are in place; the analysis
-logic is marked with TODO and currently returns a structured placeholder.
+Methodology:
+  - Land cover distribution from ESA WorldCover (10 m).
+  - Tree-cover share and recent forest loss from Hansen Global Forest Change.
+  - Preliminary deforestation-risk flag based on recent loss vs parcel area.
 
 Protected by Cloud IAP (login with Google Workspace email). See docs/IAP_AUTH.md.
 """
@@ -20,7 +22,34 @@ from google.cloud import secretmanager
 app = Flask(__name__)
 
 SERVICE_NAME = "forestscan-land-screening"
-VERSION = "0.1.0"
+VERSION = "1.0.0"
+
+ESA_WORLDCOVER = os.environ.get("ESA_WORLDCOVER", "ESA/WorldCover/v200")
+HANSEN_DATASET = os.environ.get(
+    "HANSEN_DATASET", "UMD/hansen/global_forest_change_2023_v1_11"
+)
+
+# ESA WorldCover class codes -> readable names.
+WORLDCOVER_CLASSES = {
+    10: "tree_cover",
+    20: "shrubland",
+    30: "grassland",
+    40: "cropland",
+    50: "built_up",
+    60: "bare_sparse_vegetation",
+    70: "snow_ice",
+    80: "water",
+    90: "herbaceous_wetland",
+    95: "mangroves",
+    100: "moss_lichen",
+}
+
+# Years counted as "recent" for the deforestation-risk flag.
+RECENT_LOSS_YEARS = 5
+
+# Risk thresholds: recent forest loss as a share of parcel area.
+RISK_HIGH_PCT = 5.0
+RISK_MEDIUM_PCT = 1.0
 
 
 def initialize_ee():
@@ -50,6 +79,15 @@ def initialize_ee():
 initialize_ee()
 
 
+def _risk_level(recent_loss_pct):
+    """Map recent-loss share to a qualitative risk flag."""
+    if recent_loss_pct >= RISK_HIGH_PCT:
+        return "high"
+    if recent_loss_pct >= RISK_MEDIUM_PCT:
+        return "medium"
+    return "low"
+
+
 @app.route('/land-screening', methods=['POST'])
 def land_screening():
     """Run a preliminary land screening for a parcel.
@@ -57,15 +95,8 @@ def land_screening():
     Request body:
     {
         "geometry": {"type": "Polygon", "coordinates": [...]},
-        "year": 2023
-    }
-
-    Response (skeleton placeholder):
-    {
-        "status": "skeleton",
-        "tier": "land_screening",
-        "area_ha": 150.5,
-        "summary": {...}
+        "year": 2023,            // optional, reference year for recent loss
+        "scale": 10              // optional, analysis scale in meters
     }
     """
     try:
@@ -74,22 +105,68 @@ def land_screening():
             return jsonify({'error': 'Missing required field: geometry'}), 400
 
         ee_geometry = ee.Geometry(data['geometry'])
-        year = data.get('year', datetime.utcnow().year)
+        year = int(data.get('year', 2023))
+        scale = data.get('scale', 10)
 
         area_ha = round(ee_geometry.area().divide(10000).getInfo(), 2)
 
-        # TODO: implement screening logic, e.g.:
-        #   - dominant land cover (ESA WorldCover)
-        #   - tree-cover share and recent loss (Hansen GFC)
-        #   - preliminary deforestation-risk flag
+        # --- Land cover distribution (ESA WorldCover) -----------------------
+        worldcover = ee.ImageCollection(ESA_WORLDCOVER).first().select('Map')
+        histogram = worldcover.reduceRegion(
+            reducer=ee.Reducer.frequencyHistogram(),
+            geometry=ee_geometry,
+            scale=scale,
+            maxPixels=1e13,
+            bestEffort=True,
+        ).getInfo().get('Map', {}) or {}
+
+        total_px = sum(float(v) for v in histogram.values()) or 1.0
+        land_cover_pct = {}
+        for code, count in histogram.items():
+            name = WORLDCOVER_CLASSES.get(int(code), f"class_{code}")
+            land_cover_pct[name] = round(float(count) / total_px * 100, 2)
+
+        dominant_class = (
+            max(land_cover_pct, key=land_cover_pct.get) if land_cover_pct else None
+        )
+        tree_cover_pct = land_cover_pct.get('tree_cover', 0.0)
+
+        # --- Recent forest loss (Hansen GFC) --------------------------------
+        gfc = ee.Image(HANSEN_DATASET)
+        lossyear = gfc.select('lossyear')
+        recent_threshold = (year - 2000) - RECENT_LOSS_YEARS
+        recent_loss = lossyear.gt(recent_threshold)
+
+        area_img = ee.Image.pixelArea().divide(10000)
+        recent_loss_ha = (
+            area_img.updateMask(recent_loss).rename('recent_loss_ha')
+            .reduceRegion(
+                reducer=ee.Reducer.sum(),
+                geometry=ee_geometry,
+                scale=30,
+                maxPixels=1e13,
+                bestEffort=True,
+            ).getInfo().get('recent_loss_ha') or 0.0
+        )
+        recent_loss_ha = round(recent_loss_ha, 2)
+        recent_loss_pct = round(recent_loss_ha / area_ha * 100, 2) if area_ha else 0.0
+
         response = {
-            'status': 'skeleton',
+            'status': 'ok',
             'tier': 'land_screening',
             'year': year,
             'area_ha': area_ha,
-            'summary': {
-                'message': 'Land Screening skeleton: analysis not yet implemented',
-            },
+            'land_cover_pct': land_cover_pct,
+            'dominant_class': dominant_class,
+            'tree_cover_pct': tree_cover_pct,
+            'recent_forest_loss_ha': recent_loss_ha,
+            'recent_forest_loss_pct': recent_loss_pct,
+            'recent_loss_window_years': RECENT_LOSS_YEARS,
+            'deforestation_risk': _risk_level(recent_loss_pct),
+            'methodology': (
+                f'ESA WorldCover ({ESA_WORLDCOVER}) + '
+                f'Hansen GFC ({HANSEN_DATASET})'
+            ),
         }
         return jsonify(response), 200
 

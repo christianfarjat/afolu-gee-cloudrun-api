@@ -5,8 +5,8 @@ No requiere credenciales de GEE: inyecta modulos falsos `ee` y
 y luego ejercita las rutas reales de cada servicio con el test_client de Flask.
 
 El fake de `ee` simula lo justo para que la logica de cada handler corra:
-encadenamiento de operaciones de imagen, ee.Image.pixelArea, reductores y
-reduceRegion (incluyendo el group reducer de EUDR).
+encadenamiento de operaciones de imagen, ImageCollection, Terrain.slope,
+reductores (sum / mean / frequencyHistogram / group) y reduceRegion.
 """
 
 import sys
@@ -31,30 +31,51 @@ class _FakeNumber:
 
 
 class _FakeReducer:
-    def __init__(self, grouped=False):
+    def __init__(self, kind="sum", grouped=False):
+        self.kind = kind
         self.grouped = grouped
 
     def group(self, **kwargs):
-        return _FakeReducer(grouped=True)
+        return _FakeReducer(kind=self.kind, grouped=True)
 
 
-class _FakeReduceResult:
-    """Resultado de reduceRegion; getInfo() devuelve datos de muestra."""
-    def __init__(self, grouped):
-        self.grouped = grouped
+# Valores de muestra que devuelve reduceRegion segun la banda solicitada.
+_KNOWN_BANDS = {
+    # EUDR
+    "forest_baseline_ha": 120.3,
+    "deforestation_after_cutoff_ha": 5.0,
+    # Land screening
+    "recent_loss_ha": 30.0,
+    # Land planning
+    "suitable_ha": 90.0,
+    "restricted_ha": 30.0,
+    "excluded_ha": 30.0,
+    "slope": 12.5,
+}
+
+
+class _FakeStats(dict):
+    """Resultado de reduceRegion().getInfo() con .get() parametrizado."""
+    def __init__(self, kind, grouped):
+        super().__init__()
+        self._kind = kind
+        self._grouped = grouped
 
     def getInfo(self):
-        if self.grouped:
-            # Deforestacion post-corte repartida en 2021 y 2022.
-            return {'groups': [
-                {'year_code': 21, 'sum': 3.5},
-                {'year_code': 22, 'sum': 1.5},
-            ]}
-        # Baseline de bosque y deforestacion total post-corte.
-        return {
-            'forest_baseline_ha': 120.3,
-            'deforestation_after_cutoff_ha': 5.0,
-        }
+        return self
+
+    def get(self, key, default=None):
+        if self._grouped and key == "groups":
+            return [
+                {"year_code": 21, "sum": 3.5},
+                {"year_code": 22, "sum": 1.5},
+            ]
+        if self._kind == "freq" and key == "Map":
+            # 1000 px: 80% tree, 15% grassland, 5% cropland.
+            return {"10": 800, "30": 150, "40": 50}
+        if key in _KNOWN_BANDS:
+            return _KNOWN_BANDS[key]
+        return default
 
 
 class _FakeImage:
@@ -67,15 +88,24 @@ class _FakeImage:
         return _FakeImage()
 
     def reduceRegion(self, reducer=None, **kwargs):
-        grouped = getattr(reducer, 'grouped', False)
-        return _FakeReduceResult(grouped)
+        kind = getattr(reducer, "kind", "sum")
+        grouped = getattr(reducer, "grouped", False)
+        return _FakeStats(kind, grouped)
 
     def __getattr__(self, name):
-        # select, gte, And, Or, eq, gt, multiply, divide, rename,
-        # updateMask, addBands, clip, ... -> encadenan.
+        # select, gte, gt, lt, eq, And, Or, Not, multiply, divide, rename,
+        # updateMask, addBands, clip, first, filter*, ... -> encadenan.
         def _chain(*args, **kwargs):
             return self
         return _chain
+
+
+class _FakeImageCollection(_FakeImage):
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def first(self):
+        return _FakeImage()
 
 
 class _FakeGeometry:
@@ -91,9 +121,15 @@ def _install_fakes():
     ee = types.ModuleType("ee")
     ee.Geometry = _FakeGeometry
     ee.Image = _FakeImage
-    ee.Reducer = types.SimpleNamespace(sum=lambda: _FakeReducer())
+    ee.ImageCollection = _FakeImageCollection
+    ee.Terrain = types.SimpleNamespace(slope=lambda img: _FakeImage())
+    ee.Reducer = types.SimpleNamespace(
+        sum=lambda: _FakeReducer("sum"),
+        mean=lambda: _FakeReducer("mean"),
+        frequencyHistogram=lambda: _FakeReducer("freq"),
+    )
     ee.EEException = type("EEException", (Exception,), {})
-    ee.Initialize = lambda *a, **k: None  # exito inmediato
+    ee.Initialize = lambda *a, **k: None
     ee.ServiceAccountCredentials = lambda *a, **k: None
     sys.modules["ee"] = ee
 
@@ -121,8 +157,15 @@ def _load_app(path):
 # ---------------------------------------------------------------------------
 # Validadores del POST valido por tier
 # ---------------------------------------------------------------------------
-def _check_skeleton(body):
-    return body.get("status") == "skeleton" and body.get("area_ha") == 150.5
+def _check_screening(body):
+    return (
+        body.get("status") == "ok"
+        and body.get("area_ha") == 150.5
+        and body.get("dominant_class") == "tree_cover"
+        and body.get("tree_cover_pct") == 80.0
+        and body.get("recent_forest_loss_ha") == 30.0
+        and body.get("deforestation_risk") == "high"
+    )
 
 
 def _check_eudr(body):
@@ -136,6 +179,17 @@ def _check_eudr(body):
     )
 
 
+def _check_planning(body):
+    zones = body.get("zones", [])
+    return (
+        body.get("status") == "ok"
+        and body.get("area_ha") == 150.5
+        and body.get("mean_slope_deg") == 12.5
+        and len(zones) == 3
+        and {z["zone"] for z in zones} == {"suitable", "restricted", "excluded"}
+    )
+
+
 SAMPLE_GEOMETRY = {
     "type": "Polygon",
     "coordinates": [[[-84.0, 10.0], [-83.9, 10.0], [-83.9, 10.1], [-84.0, 10.1], [-84.0, 10.0]]],
@@ -144,14 +198,14 @@ SAMPLE_GEOMETRY = {
 # (carpeta, endpoint, service_name, payload_valido, validador, label_post)
 TIERS = [
     ("land-screening", "/land-screening", "forestscan-land-screening",
-     {"geometry": SAMPLE_GEOMETRY, "year": 2023}, _check_skeleton,
-     "POST valido -> 200 + skeleton + area_ha=150.5"),
+     {"geometry": SAMPLE_GEOMETRY, "year": 2023}, _check_screening,
+     "POST valido -> 200 + dominant=tree_cover + tree 80% + riesgo=high"),
     ("eudr", "/eudr-check", "forestscan-eudr",
      {"geometry": SAMPLE_GEOMETRY, "commodity": "cattle"}, _check_eudr,
      "POST valido -> 200 + compliant=False + 5.0 ha post-corte + desglose por anio"),
     ("land-planning", "/land-planning", "forestscan-land-planning",
-     {"geometry": SAMPLE_GEOMETRY, "objective": "restoration"}, _check_skeleton,
-     "POST valido -> 200 + skeleton + area_ha=150.5"),
+     {"geometry": SAMPLE_GEOMETRY, "objective": "restoration"}, _check_planning,
+     "POST valido -> 200 + 3 zonas (suitable/restricted/excluded) + pendiente media"),
 ]
 
 
