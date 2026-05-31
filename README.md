@@ -93,22 +93,31 @@ JSON Results → Agent
 
 ```
 afolu-gee-cloudrun-api/
-├── ndvi/
+├── ndvi/                 # GEE API: NDVI
+├── landcover/            # GEE API: Land Cover
+├── biomass/              # GEE API: Biomass / Carbon
 │   ├── main.py
 │   ├── requirements.txt
 │   └── Dockerfile
-├── landcover/
-│   ├── main.py
-│   ├── requirements.txt
-│   └── Dockerfile
-├── biomass/
+├── land-screening/       # ForestScan tier: Land Screening
+├── eudr/                 # ForestScan tier: EUDR compliance
+├── land-planning/        # ForestScan tier: Land Planning
 │   ├── main.py
 │   ├── requirements.txt
 │   └── Dockerfile
 ├── shared/
 │   └── gee_utils.py
+├── tools/
+│   └── setup_iap.sh      # Cloud IAP setup (Workspace login) per tier
+├── docs/
+│   └── IAP_AUTH.md       # IAP authentication guide
 └── deploy.sh
 ```
+
+> The three **ForestScan tiers** (`land-screening`, `eudr`, `land-planning`) are
+> currently **skeletons**: GEE wiring, endpoints and IAP protection are in place,
+> and the analysis logic is marked with `TODO`. They are deployed without
+> `--allow-unauthenticated`; access is gated by Cloud IAP (see below).
 
 ## 🛠️ Setup
 
