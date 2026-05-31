@@ -6,6 +6,10 @@ tiers de ForestScan con **Cloud IAP** (login con email de Google Workspace).
 > El despliegue se ejecuta con **tu** sesión de `gcloud` autenticada contra el
 > proyecto real. No se puede correr desde el entorno remoto de Claude (no tiene
 > `gcloud` ni credenciales del proyecto).
+>
+> 🤖 **¿Despliegue automático?** Para que el deploy corra solo desde GitHub
+> Actions (sin gcloud local), ver [`docs/CICD_SETUP.md`](CICD_SETUP.md)
+> (Workload Identity Federation). Esta guía cubre el despliegue manual.
 
 ## Configuración del proyecto
 

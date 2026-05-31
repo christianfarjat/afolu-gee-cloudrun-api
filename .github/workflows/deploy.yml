@@ -1,0 +1,97 @@
+name: Deploy ForestScan tiers
+
+# Despliega los 3 tiers de ForestScan a Cloud Run y configura Cloud IAP.
+# Autenticacion via Workload Identity Federation (sin claves JSON).
+# Configuracion previa (una vez): ver docs/CICD_SETUP.md.
+
+on:
+  workflow_dispatch: {}        # ejecucion manual desde la pestania Actions
+  push:
+    branches: [main]
+    paths:
+      - 'land-screening/**'
+      - 'eudr/**'
+      - 'land-planning/**'
+      - 'tools/setup_iap.sh'
+      - '.github/workflows/deploy.yml'
+
+permissions:
+  contents: read
+  id-token: write              # requerido por WIF
+
+env:
+  PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  REGION: ${{ vars.GCP_REGION }}
+
+jobs:
+  deploy:
+    name: Deploy ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dir: land-screening
+            service: forestscan-land-screening
+          - dir: eudr
+            service: forestscan-eudr
+          - dir: land-planning
+            service: forestscan-land-planning
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy ${{ matrix.service }} to Cloud Run
+        run: |
+          gcloud run deploy "${{ matrix.service }}" \
+            --source "${{ matrix.dir }}" \
+            --project "$PROJECT_ID" \
+            --region "$REGION" \
+            --platform managed \
+            --no-allow-unauthenticated \
+            --service-account "${{ vars.GCP_RUNTIME_SA }}" \
+            --memory 1Gi \
+            --timeout 300 \
+            --min-instances 0 \
+            --max-instances 10 \
+            --quiet
+
+      - name: Show service URL
+        run: |
+          gcloud run services describe "${{ matrix.service }}" \
+            --project "$PROJECT_ID" --region "$REGION" \
+            --format 'value(status.url)'
+
+  setup-iap:
+    name: Configure Cloud IAP
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Apply IAP to each tier
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          REGION: ${{ vars.GCP_REGION }}
+          WORKSPACE_DOMAIN: ${{ vars.WORKSPACE_DOMAIN }}
+          CLOUDSDK_CORE_DISABLE_PROMPTS: "1"   # auto-instala componente beta
+        run: bash tools/setup_iap.sh
