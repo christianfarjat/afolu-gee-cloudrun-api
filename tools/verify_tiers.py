@@ -1,8 +1,12 @@
-"""Verificacion local de los esqueletos de tiers de ForestScan.
+"""Verificacion local de los servicios de tiers de ForestScan.
 
 No requiere credenciales de GEE: inyecta modulos falsos `ee` y
 `google.cloud.secretmanager` para que initialize_ee() tenga exito al importar,
 y luego ejercita las rutas reales de cada servicio con el test_client de Flask.
+
+El fake de `ee` simula lo justo para que la logica de cada handler corra:
+encadenamiento de operaciones de imagen, ee.Image.pixelArea, reductores y
+reduceRegion (incluyendo el group reducer de EUDR).
 """
 
 import sys
@@ -12,10 +16,10 @@ import os
 
 
 # ---------------------------------------------------------------------------
-# Fakes: ee + google.cloud.secretmanager
+# Fakes de Earth Engine
 # ---------------------------------------------------------------------------
 class _FakeNumber:
-    """Simula el encadenamiento ee.Geometry(...).area().divide(n).getInfo()."""
+    """Simula ee.Number / Geometry.area().divide(n).getInfo()."""
     def __init__(self, value):
         self.value = value
 
@@ -24,6 +28,54 @@ class _FakeNumber:
 
     def getInfo(self):
         return self.value
+
+
+class _FakeReducer:
+    def __init__(self, grouped=False):
+        self.grouped = grouped
+
+    def group(self, **kwargs):
+        return _FakeReducer(grouped=True)
+
+
+class _FakeReduceResult:
+    """Resultado de reduceRegion; getInfo() devuelve datos de muestra."""
+    def __init__(self, grouped):
+        self.grouped = grouped
+
+    def getInfo(self):
+        if self.grouped:
+            # Deforestacion post-corte repartida en 2021 y 2022.
+            return {'groups': [
+                {'year_code': 21, 'sum': 3.5},
+                {'year_code': 22, 'sum': 1.5},
+            ]}
+        # Baseline de bosque y deforestacion total post-corte.
+        return {
+            'forest_baseline_ha': 120.3,
+            'deforestation_after_cutoff_ha': 5.0,
+        }
+
+
+class _FakeImage:
+    """Imagen encadenable; cualquier operacion devuelve otra _FakeImage."""
+    def __init__(self, *args, **kwargs):
+        pass
+
+    @staticmethod
+    def pixelArea():
+        return _FakeImage()
+
+    def reduceRegion(self, reducer=None, **kwargs):
+        grouped = getattr(reducer, 'grouped', False)
+        return _FakeReduceResult(grouped)
+
+    def __getattr__(self, name):
+        # select, gte, And, Or, eq, gt, multiply, divide, rename,
+        # updateMask, addBands, clip, ... -> encadenan.
+        def _chain(*args, **kwargs):
+            return self
+        return _chain
 
 
 class _FakeGeometry:
@@ -38,6 +90,8 @@ class _FakeGeometry:
 def _install_fakes():
     ee = types.ModuleType("ee")
     ee.Geometry = _FakeGeometry
+    ee.Image = _FakeImage
+    ee.Reducer = types.SimpleNamespace(sum=lambda: _FakeReducer())
     ee.EEException = type("EEException", (Exception,), {})
     ee.Initialize = lambda *a, **k: None  # exito inmediato
     ee.ServiceAccountCredentials = lambda *a, **k: None
@@ -65,20 +119,39 @@ def _load_app(path):
 
 
 # ---------------------------------------------------------------------------
-# Casos por tier: (carpeta, endpoint, service_name, payload_valido)
+# Validadores del POST valido por tier
 # ---------------------------------------------------------------------------
+def _check_skeleton(body):
+    return body.get("status") == "skeleton" and body.get("area_ha") == 150.5
+
+
+def _check_eudr(body):
+    return (
+        body.get("status") == "ok"
+        and body.get("area_ha") == 150.5
+        and body.get("forest_baseline_ha") == 120.3
+        and body.get("deforestation_after_cutoff_ha") == 5.0
+        and body.get("compliant") is False
+        and body.get("deforestation_by_year_ha") == {"2021": 3.5, "2022": 1.5}
+    )
+
+
 SAMPLE_GEOMETRY = {
     "type": "Polygon",
     "coordinates": [[[-84.0, 10.0], [-83.9, 10.0], [-83.9, 10.1], [-84.0, 10.1], [-84.0, 10.0]]],
 }
 
+# (carpeta, endpoint, service_name, payload_valido, validador, label_post)
 TIERS = [
     ("land-screening", "/land-screening", "forestscan-land-screening",
-     {"geometry": SAMPLE_GEOMETRY, "year": 2023}),
+     {"geometry": SAMPLE_GEOMETRY, "year": 2023}, _check_skeleton,
+     "POST valido -> 200 + skeleton + area_ha=150.5"),
     ("eudr", "/eudr-check", "forestscan-eudr",
-     {"geometry": SAMPLE_GEOMETRY, "commodity": "cattle"}),
+     {"geometry": SAMPLE_GEOMETRY, "commodity": "cattle"}, _check_eudr,
+     "POST valido -> 200 + compliant=False + 5.0 ha post-corte + desglose por anio"),
     ("land-planning", "/land-planning", "forestscan-land-planning",
-     {"geometry": SAMPLE_GEOMETRY, "objective": "restoration"}),
+     {"geometry": SAMPLE_GEOMETRY, "objective": "restoration"}, _check_skeleton,
+     "POST valido -> 200 + skeleton + area_ha=150.5"),
 ]
 
 
@@ -87,37 +160,28 @@ def main():
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     all_ok = True
 
-    for folder, endpoint, service_name, payload in TIERS:
+    for folder, endpoint, service_name, payload, validate, post_label in TIERS:
         print(f"\n=== {service_name} ({folder}{endpoint}) ===")
         app = _load_app(os.path.join(repo_root, folder, "main.py"))
         client = app.test_client()
 
         checks = []
 
-        # 1) /health
         r = client.get("/health")
         ok = r.status_code == 200 and r.get_json().get("service") == service_name
         checks.append(("GET /health -> 200 + service", ok))
 
-        # 2) /
         r = client.get("/")
         ok = r.status_code == 200 and endpoint in r.get_json().get("endpoints", {})
         checks.append(("GET / -> 200 + endpoint listado", ok))
 
-        # 3) endpoint principal sin geometry -> 400
         r = client.post(endpoint, json={})
         ok = r.status_code == 400 and "geometry" in r.get_json().get("error", "")
         checks.append(("POST sin geometry -> 400", ok))
 
-        # 4) endpoint principal con payload valido -> 200 + skeleton
         r = client.post(endpoint, json=payload)
-        body = r.get_json()
-        ok = (
-            r.status_code == 200
-            and body.get("status") == "skeleton"
-            and body.get("area_ha") == 150.5
-        )
-        checks.append(("POST valido -> 200 + skeleton + area_ha=150.5", ok))
+        ok = r.status_code == 200 and validate(r.get_json())
+        checks.append((post_label, ok))
 
         for name, passed in checks:
             print(f"  {'PASS' if passed else 'FAIL'}  {name}")

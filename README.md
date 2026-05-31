@@ -114,10 +114,13 @@ afolu-gee-cloudrun-api/
 └── deploy.sh
 ```
 
-> The three **ForestScan tiers** (`land-screening`, `eudr`, `land-planning`) are
-> currently **skeletons**: GEE wiring, endpoints and IAP protection are in place,
-> and the analysis logic is marked with `TODO`. They are deployed without
-> `--allow-unauthenticated`; access is gated by Cloud IAP (see below).
+> The **EUDR tier** (`eudr`) implements real deforestation-compliance analysis
+> using Hansen Global Forest Change (forest loss after the 2020-12-31 cutoff).
+> **Land Screening** and **Land Planning** are still **skeletons** (GEE wiring,
+> endpoints and IAP protection in place; analysis logic marked with `TODO`).
+> All three tiers are deployed without `--allow-unauthenticated`; access is
+> gated by Cloud IAP (see below). Run `tools/verify_tiers.py` to smoke-test them
+> locally without GEE credentials.
 
 ## 🛠️ Setup
 
