@@ -207,3 +207,6 @@ marimo/_lsp/
 __marimo__/
 service-account-key.json
 *.json # opcional: protege cualquier JSON de credenciales
+
+# Local verify venv
+.verifyvenv/
