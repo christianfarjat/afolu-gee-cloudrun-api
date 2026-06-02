@@ -35,6 +35,43 @@ Cloud Run (tier de ForestScan)
 - El acceso anónimo queda deshabilitado (`--no-allow-unauthenticated`).
 - La autorización se controla con IAM (`roles/iap.httpsResourceAccessor`).
 
+## Validación a nivel de aplicación (defensa en profundidad)
+
+Además del IAP a nivel de plataforma, **cada tier valida la identidad dentro del
+código** (`auth.py` en cada servicio):
+
+- Lee la identidad que IAP inyecta y **exige el dominio Workspace** (`@mjmenergia.com`).
+- Resolución de identidad:
+  1. Si está seteada la env `IAP_AUDIENCE`, **verifica criptográficamente** el JWT
+     firmado de IAP (header `X-Goog-IAP-JWT-Assertion`): firma, emisor
+     (`https://cloud.google.com/iap`) y audiencia.
+  2. Si no, usa el header `X-Goog-Authenticated-User-Email` que setea IAP.
+- Los endpoints de análisis y `/whoami` están protegidos con el decorador
+  `@require_google_auth`. `/health` y `/` quedan públicos (para health checks).
+
+Respuestas de error: `401` sin identidad válida, `403` si el email no pertenece
+al dominio autorizado. Las respuestas exitosas incluyen `authenticated_user`.
+
+### Variables de entorno (runtime de cada tier)
+
+| Variable | Default | Descripción |
+|---|---|---|
+| `WORKSPACE_DOMAIN` | `mjmenergia.com` | Dominio Workspace autorizado |
+| `IAP_AUDIENCE` | _(vacío)_ | Audiencia esperada del JWT de IAP; si se setea, activa la verificación de firma |
+| `AUTH_REQUIRED` | `true` | `false` desactiva la validación (solo desarrollo local) |
+
+> Obtener la audiencia para Cloud Run + IAP:
+> `gcloud iap web get-iam-policy` / consola IAP. Mientras no esté seteada,
+> la app confía en el header de IAP (válido porque IAP descarta copias
+> provenientes del cliente).
+
+### `/whoami`
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" "$URL/whoami"
+# -> {"authenticated_user": "usuario@mjmenergia.com"}
+```
+
 ## Prerrequisitos
 
 1. `gcloud` CLI instalado y autenticado (`gcloud auth login`).

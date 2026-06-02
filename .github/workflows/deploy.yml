@@ -62,6 +62,7 @@ jobs:
             --platform managed \
             --no-allow-unauthenticated \
             --service-account "${{ vars.GCP_RUNTIME_SA }}" \
+            --set-env-vars "WORKSPACE_DOMAIN=${{ vars.WORKSPACE_DOMAIN }}" \
             --memory 1Gi \
             --timeout 300 \
             --min-instances 0 \

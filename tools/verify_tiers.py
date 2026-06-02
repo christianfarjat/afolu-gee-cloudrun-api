@@ -145,13 +145,32 @@ def _install_fakes():
 
 
 def _load_app(path):
-    """Importa un main.py aislado y devuelve su objeto Flask `app`."""
-    spec = importlib.util.spec_from_file_location(
-        f"tier_{abs(hash(path))}", path
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.app
+    """Importa un main.py aislado y devuelve su objeto Flask `app`.
+
+    Inserta la carpeta del tier en sys.path para que resuelva `import auth`,
+    y limpia el modulo `auth` cacheado entre tiers (cada tier tiene el suyo).
+    """
+    folder = os.path.dirname(path)
+    sys.modules.pop("auth", None)
+    sys.path.insert(0, folder)
+    try:
+        spec = importlib.util.spec_from_file_location(
+            f"tier_{abs(hash(path))}", path
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.app
+    finally:
+        if sys.path and sys.path[0] == folder:
+            sys.path.pop(0)
+
+
+# Headers que IAP inyecta tras autenticar al usuario.
+VALID_USER = "christian.farjat@mjmenergia.com"
+AUTH_HEADERS = {"X-Goog-Authenticated-User-Email": f"accounts.google.com:{VALID_USER}"}
+WRONG_DOMAIN_HEADERS = {
+    "X-Goog-Authenticated-User-Email": "accounts.google.com:hacker@gmail.com"
+}
 
 
 # ---------------------------------------------------------------------------
@@ -223,19 +242,38 @@ def main():
 
         r = client.get("/health")
         ok = r.status_code == 200 and r.get_json().get("service") == service_name
-        checks.append(("GET /health -> 200 + service", ok))
+        checks.append(("GET /health -> 200 + service (publico)", ok))
 
         r = client.get("/")
         ok = r.status_code == 200 and endpoint in r.get_json().get("endpoints", {})
-        checks.append(("GET / -> 200 + endpoint listado", ok))
+        checks.append(("GET / -> 200 + endpoint listado (publico)", ok))
 
-        r = client.post(endpoint, json={})
+        # --- Autenticacion Google / IAP ---
+        r = client.post(endpoint, json=payload)  # sin header de IAP
+        ok = r.status_code == 401
+        checks.append(("POST sin auth -> 401", ok))
+
+        r = client.post(endpoint, json=payload, headers=WRONG_DOMAIN_HEADERS)
+        ok = r.status_code == 403
+        checks.append(("POST dominio no autorizado -> 403", ok))
+
+        r = client.get("/whoami", headers=AUTH_HEADERS)
+        ok = r.status_code == 200 and r.get_json().get("authenticated_user") == VALID_USER
+        checks.append(("GET /whoami con auth -> 200 + usuario", ok))
+
+        # --- Logica del tier (autenticado) ---
+        r = client.post(endpoint, json={}, headers=AUTH_HEADERS)
         ok = r.status_code == 400 and "geometry" in r.get_json().get("error", "")
-        checks.append(("POST sin geometry -> 400", ok))
+        checks.append(("POST auth sin geometry -> 400", ok))
 
-        r = client.post(endpoint, json=payload)
-        ok = r.status_code == 200 and validate(r.get_json())
-        checks.append((post_label, ok))
+        r = client.post(endpoint, json=payload, headers=AUTH_HEADERS)
+        body = r.get_json()
+        ok = (
+            r.status_code == 200
+            and validate(body)
+            and body.get("authenticated_user") == VALID_USER
+        )
+        checks.append((post_label + " + authenticated_user", ok))
 
         for name, passed in checks:
             print(f"  {'PASS' if passed else 'FAIL'}  {name}")

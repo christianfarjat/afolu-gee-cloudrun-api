@@ -19,6 +19,8 @@ from datetime import datetime
 from flask import Flask, request, jsonify
 from google.cloud import secretmanager
 
+from auth import require_google_auth, get_current_user
+
 app = Flask(__name__)
 
 SERVICE_NAME = "forestscan-land-screening"
@@ -89,6 +91,7 @@ def _risk_level(recent_loss_pct):
 
 
 @app.route('/land-screening', methods=['POST'])
+@require_google_auth
 def land_screening():
     """Run a preliminary land screening for a parcel.
 
@@ -154,6 +157,7 @@ def land_screening():
         response = {
             'status': 'ok',
             'tier': 'land_screening',
+            'authenticated_user': get_current_user(),
             'year': year,
             'area_ha': area_ha,
             'land_cover_pct': land_cover_pct,
@@ -174,6 +178,13 @@ def land_screening():
         return jsonify({'error': 'Earth Engine error', 'message': str(e)}), 500
     except Exception as e:
         return jsonify({'error': 'Internal server error', 'message': str(e)}), 500
+
+
+@app.route('/whoami', methods=['GET'])
+@require_google_auth
+def whoami():
+    """Return the Google Workspace identity authenticated by Cloud IAP."""
+    return jsonify({'authenticated_user': get_current_user()}), 200
 
 
 @app.route('/health', methods=['GET'])
