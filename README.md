@@ -93,22 +93,38 @@ JSON Results → Agent
 
 ```
 afolu-gee-cloudrun-api/
-├── ndvi/
+├── ndvi/                 # GEE API: NDVI
+├── landcover/            # GEE API: Land Cover
+├── biomass/              # GEE API: Biomass / Carbon
 │   ├── main.py
 │   ├── requirements.txt
 │   └── Dockerfile
-├── landcover/
-│   ├── main.py
-│   ├── requirements.txt
-│   └── Dockerfile
-├── biomass/
+├── land-screening/       # ForestScan tier: Land Screening
+├── eudr/                 # ForestScan tier: EUDR compliance
+├── land-planning/        # ForestScan tier: Land Planning
 │   ├── main.py
 │   ├── requirements.txt
 │   └── Dockerfile
 ├── shared/
 │   └── gee_utils.py
+├── tools/
+│   └── setup_iap.sh      # Cloud IAP setup (Workspace login) per tier
+├── docs/
+│   └── IAP_AUTH.md       # IAP authentication guide
 └── deploy.sh
 ```
+
+> The three **ForestScan tiers** now implement real analysis:
+> - **Land Screening** — land-cover distribution (ESA WorldCover) + recent
+>   forest loss and a deforestation-risk flag (Hansen GFC).
+> - **EUDR** — deforestation-compliance check for forest loss after the
+>   2020-12-31 cutoff (Hansen GFC).
+> - **Land Planning** — suitable/restricted/excluded zoning by objective
+>   (ESA WorldCover + SRTM slope).
+>
+> All three are deployed without `--allow-unauthenticated`; access is gated by
+> Cloud IAP (see below). Run `tools/verify_tiers.py` to smoke-test them locally
+> without GEE credentials.
 
 ## 🛠️ Setup
 
@@ -159,12 +175,22 @@ gcloud run deploy ndvi-service \
 
 ## 🔐 Authentication
 
-The services use Google Application Default Credentials (ADC) for GEE authentication. In Cloud Run, this is automatically handled by the service account.
+There are two independent layers of authentication:
+
+**1. GEE backend auth** — The services use Google Application Default Credentials (ADC) for GEE authentication. In Cloud Run, this is automatically handled by the service account.
 
 For local development:
 ```bash
 gcloud auth application-default login
 ```
+
+**2. User access (ForestScan tiers)** — Each ForestScan tier (Land Screening, EUDR, Land Planning) is protected with **Cloud IAP**, so users log in with their **Google Workspace email** (`@mjmenergia.com`). IAP validates identity before the request reaches Cloud Run, with no code changes and no load balancer.
+
+```bash
+bash tools/setup_iap.sh
+```
+
+See [`docs/IAP_AUTH.md`](docs/IAP_AUTH.md) for the full setup and operations guide.
 
 ## 💰 Costs
 

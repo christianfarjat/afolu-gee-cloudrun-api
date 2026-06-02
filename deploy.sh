@@ -73,6 +73,35 @@ cd ..
 # echo "✅ Biomass Service deployed: $BIOMASS_URL"
 # cd ..
 
+# ----------------------------------------------------------------------------
+# ForestScan tiers (Land Screening, EUDR, Land Planning)
+# Deployed WITHOUT --allow-unauthenticated: user access is controlled by
+# Cloud IAP (Google Workspace login). Run tools/setup_iap.sh afterwards.
+# ----------------------------------------------------------------------------
+echo ""
+echo "🌲 Deploying ForestScan tiers..."
+for tier in "land-screening:forestscan-land-screening" \
+            "eudr:forestscan-eudr" \
+            "land-planning:forestscan-land-planning"; do
+  DIR="${tier%%:*}"
+  SVC="${tier##*:}"
+  echo ""
+  echo "→ Deploying $SVC (from ./$DIR)..."
+  cd "$DIR"
+  gcloud run deploy "$SVC" \
+    --source . \
+    --region $REGION \
+    --platform managed \
+    --no-allow-unauthenticated \
+    --memory 1Gi \
+    --timeout 300 \
+    --min-instances 0 \
+    --max-instances 10
+  TIER_URL=$(gcloud run services describe "$SVC" --region $REGION --format 'value(status.url)')
+  echo "✅ $SVC deployed: $TIER_URL"
+  cd ..
+done
+
 echo ""
 echo "✨ Deployment Complete!"
 echo ""
@@ -82,8 +111,9 @@ echo "  NDVI Calculator: $NDVI_URL"
 # echo "  Biomass: $BIOMASS_URL"
 echo ""
 echo "Next steps:"
-echo "1. Test the endpoints with sample data"
-echo "2. Configure these URLs as MCP custom tools in OpenAI Agent Builder"
-echo "3. Monitor logs: gcloud run services logs read ndvi-service --region $REGION"
+echo "1. Protect ForestScan tiers with Cloud IAP: bash tools/setup_iap.sh"
+echo "2. Test the endpoints with sample data"
+echo "3. Configure these URLs as MCP custom tools in OpenAI Agent Builder"
+echo "4. Monitor logs: gcloud run services logs read ndvi-service --region $REGION"
 echo ""
 echo "📝 Remember to uncomment landcover and biomass deployment after creating those services!"
